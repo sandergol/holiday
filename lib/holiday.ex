@@ -65,6 +65,78 @@ defmodule Holiday do
     end
   end
 
+  @doc """
+  def time_until_holiday/3 return float until next holiday.
+
+  > The following units of measure are supported:
+  > :day
+  > :hour
+  > :minute
+  > :second
+
+  ## Examples
+    iex> Holiday.init_db() |> Holiday.time_until_holiday(:day, ~U[2022-12-23 00:10:00.000000Z])
+    1.99
+    iex> Holiday.init_db() |> Holiday.time_until_holiday(:day, ~U[2021-12-23 00:00:00.000000Z])
+    2.0
+    iex> Holiday.init_db() |> Holiday.time_until_holiday(:hour, ~U[2030-12-23 00:00:00.000000Z])
+    48.0
+
+  If you do not pass a database as the first argument, it will look for the next holiday in the next year.
+
+  ## Examples
+    iex> Holiday.time_until_holiday([], :hour, ~U[2022-12-23 00:00:00.000000Z])
+    216.0
+  """
+  @spec time_until_holiday(
+          db :: List.t(),
+          unit :: atom,
+          now :: DateTime.t()
+        ) :: false | number
+  def time_until_holiday(db, unit, now \\ DateTime.utc_now()) do
+    if db == [] do
+      next_holiday_next_year(init_db(), now, unit)
+    else
+      dtstart = change_year(hd(db).dtstart, now.year)
+      dtend = change_year(hd(db).dtend, now.year)
+
+      holiday = date_diff(dtstart, dtend, now, unit)
+
+      cond do
+        holiday.start <= 0 ->
+          time_until_holiday(tl(db), unit, now)
+
+        true ->
+          holiday.start
+      end
+    end
+  end
+
+  @spec next_holiday_next_year(
+          db :: List.t(),
+          date_time :: DateTime.t(),
+          unit :: atom,
+          before_start :: nil | number
+        ) :: number | false
+  defp next_holiday_next_year(db, date_time, unit, before_start \\ nil) do
+    if db == [] do
+      false
+    else
+      dtstart = change_year(hd(db).dtstart, date_time.year + 1)
+      dtend = change_year(hd(db).dtend, date_time.year + 1)
+
+      holiday = date_diff(dtstart, dtend, date_time, unit)
+
+      cond do
+        before_start >= holiday.start and tl(db) != [] ->
+          next_holiday_next_year(tl(db), date_time, unit, holiday.start)
+
+        true ->
+          before_start
+      end
+    end
+  end
+
   @spec date_diff(
           dtstart :: DateTime.t(),
           dtend :: DateTime.t(),

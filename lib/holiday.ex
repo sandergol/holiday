@@ -1,4 +1,6 @@
 defmodule Holiday do
+  import Ecto.Query
+
   @holidays_path Path.join(["date", "us-california-nonworkingdays.ics"])
 
   @moduledoc """
@@ -6,67 +8,58 @@ defmodule Holiday do
   """
 
   @doc """
-  def init_db/0 return list events holiday.
-
-  Example list:
-
-  ```elixir
-  [
-    %ICalendar.Event{
-      summary: "Film with Amy and Adam",
-      dtstart: {{2015, 12, 24}, {8, 30, 00}},
-      dtend:   {{2015, 12, 24}, {8, 45, 00}},
-      description: "Let's go see Star Wars.",
-      location: "123 Fun Street, Toronto ON, Canada"
-    },
-    %ICalendar.Event{
-      summary: "Morning meeting",
-      dtstart: Timex.now,
-      dtend:   Timex.shift(Timex.now, hours: 3),
-      description: "A big long meeting with lots of details.",
-      location: "456 Boring Street, Toronto ON, Canada"
-    },
-  ]
-  ```
+  def `init_db/0` parse list events holiday and write DB.
   """
-  @spec init_db :: List.t()
+  @spec init_db :: :ok
   def init_db do
-    File.read!(@holidays_path) |> ICalendar.from_ics()
+    File.read!(@holidays_path)
+    |> ICalendar.from_ics()
+    |> Enum.each(fn el ->
+      changeset =
+        Holiday.Holiday.changeset(%Holiday.Holiday{
+          id: el.uid,
+          dtstart: el.dtstart,
+          dtend: el.dtend,
+          status: String.downcase(el.status),
+          summary: el.summary
+        })
+
+      if Holiday.Holiday |> Holiday.Repo.get(el.uid) do
+        Holiday.Repo.update!(changeset)
+      else
+        Holiday.Repo.insert!(changeset)
+      end
+    end)
   end
 
   @doc """
-  def is_holiday/2 return boolean.
+  def `is_holiday/1` return boolean.
 
   ## Examples
-    iex> Holiday.init_db() |> Holiday.is_holiday(~D[2022-12-25])
+    iex> Holiday.is_holiday(~D[2022-12-25])
     true
-    iex> Holiday.init_db() |> Holiday.is_holiday(~D[2022-12-26])
+    iex> Holiday.is_holiday(~D[2022-12-27])
     false
   """
-  @spec is_holiday(db :: List.t(), day :: Date.t()) :: boolean
-  def is_holiday(db, day \\ Date.utc_today()) do
-    if db == [] do
-      false
-    else
-      date_time =
-        case DateTime.new(day, Time.utc_now()) do
-          {:ok, date} -> date
-        end
+  @spec is_holiday(day :: Date.t()) :: boolean
+  def is_holiday(day \\ Date.utc_today()) do
+    query =
+      from(h in Holiday.Holiday,
+        where:
+          h.status == "confirmed" and
+            ((fragment("date_part('year', ?)", h.dtstart) <= ^day.year and
+                fragment("date_part('month', ?)", h.dtstart) == ^day.month and
+                fragment("date_part('day', ?)", h.dtstart) == ^day.day) or
+               (fragment("date_part('year', ?)", h.dtend) <= ^day.year and
+                  fragment("date_part('month', ?)", h.dtend) == ^day.month and
+                  fragment("date_part('day', ?)", h.dtend) == ^day.day))
+      )
 
-      date_time =
-        if date_time.year < Date.utc_today().year, do: change_year(date_time), else: date_time
-
-      holiday = date_diff(change_year(hd(db).dtstart), change_year(hd(db).dtend), date_time)
-
-      cond do
-        holiday.start <= 0 and holiday.end >= 0 -> true
-        true -> is_holiday(tl(db), day)
-      end
-    end
+    Holiday.Repo.all(query) != []
   end
 
   @doc """
-  def time_until_holiday/3 return float until next holiday.
+  def `time_until_holiday/2` return float until next holiday.
 
   > The following units of measure are supported:
   > :day
@@ -75,66 +68,51 @@ defmodule Holiday do
   > :second
 
   ## Examples
-    iex> Holiday.init_db() |> Holiday.time_until_holiday(:day, ~U[2022-12-23 00:10:00.000000Z])
+    iex> Holiday.time_until_holiday(:day, ~U[2022-12-23 00:10:00.000000Z])
     1.99
-    iex> Holiday.init_db() |> Holiday.time_until_holiday(:day, ~U[2021-12-23 00:00:00.000000Z])
+    iex> Holiday.time_until_holiday(:day, ~U[2021-12-23 00:00:00.000000Z])
     2.0
-    iex> Holiday.init_db() |> Holiday.time_until_holiday(:hour, ~U[2030-12-23 00:00:00.000000Z])
+    iex> Holiday.time_until_holiday(:hour, ~U[2030-12-23 00:00:00.000000Z])
     48.0
-
-  If you do not pass a database as the first argument, it will look for the next holiday in the next year.
-
-  ## Examples
-    iex> Holiday.time_until_holiday([], :hour, ~U[2022-12-23 00:00:00.000000Z])
-    216.0
   """
   @spec time_until_holiday(
-          db :: List.t(),
           unit :: atom,
           now :: DateTime.t()
-        ) :: false | number
-  def time_until_holiday(db, unit, now \\ DateTime.utc_now()) do
-    if db == [] do
-      next_holiday_next_year(init_db(), now, unit)
-    else
-      dtstart = change_year(hd(db).dtstart, now.year)
-      dtend = change_year(hd(db).dtend, now.year)
+        ) :: number
+  def time_until_holiday(unit, now \\ DateTime.utc_now()) do
+    query =
+      from(h in Holiday.Holiday,
+        where:
+          h.status == "confirmed" and
+            ((fragment("date_part('year', ?)", h.dtstart) <= ^now.year and
+                fragment("date_part('month', ?)", h.dtstart) == ^now.month and
+                fragment("date_part('day', ?)", h.dtstart) > ^now.day) or
+               (fragment("date_part('year', ?)", h.dtstart) <= ^now.year and
+                  fragment("date_part('month', ?)", h.dtstart) > ^now.month)),
+        order_by: [asc: h.dtstart],
+        limit: 1
+      )
 
-      holiday = date_diff(dtstart, dtend, now, unit)
+    result =
+      case next = List.first(Holiday.Repo.all(query)) do
+        nil ->
+          query =
+            from(h in Holiday.Holiday,
+              where: fragment("date_part('month', ?)", h.dtstart) >= 01,
+              order_by: [asc: h.dtstart],
+              limit: 1
+            )
 
-      cond do
-        holiday.start <= 0 ->
-          time_until_holiday(tl(db), unit, now)
+          %{next: List.first(Holiday.Repo.all(query)), year: now.year + 1}
 
-        true ->
-          holiday.start
+        _ ->
+          %{next: next, year: now.year}
       end
-    end
-  end
 
-  @spec next_holiday_next_year(
-          db :: List.t(),
-          date_time :: DateTime.t(),
-          unit :: atom,
-          before_start :: nil | number
-        ) :: number | false
-  defp next_holiday_next_year(db, date_time, unit, before_start \\ nil) do
-    if db == [] do
-      false
-    else
-      dtstart = change_year(hd(db).dtstart, date_time.year + 1)
-      dtend = change_year(hd(db).dtend, date_time.year + 1)
+    dtstart = change_year(result.next.dtstart, result.year)
+    dtend = change_year(result.next.dtend, result.year)
 
-      holiday = date_diff(dtstart, dtend, date_time, unit)
-
-      cond do
-        before_start >= holiday.start and tl(db) != [] ->
-          next_holiday_next_year(tl(db), date_time, unit, holiday.start)
-
-        true ->
-          before_start
-      end
-    end
+    date_diff(dtstart, dtend, now, unit).start
   end
 
   @spec date_diff(
@@ -143,7 +121,7 @@ defmodule Holiday do
           custom_data :: DateTime.t(),
           unit :: atom
         ) :: %{start: number, end: number}
-  defp date_diff(dtstart, dtend, custom_data, unit \\ :day) do
+  defp date_diff(dtstart, dtend, custom_data, unit) do
     holiday_start = DateTime.diff(dtstart, custom_data)
     holiday_end = DateTime.diff(dtend, custom_data)
 
@@ -172,7 +150,7 @@ defmodule Holiday do
   end
 
   @spec change_year(date_time :: DateTime.t(), year :: number) :: DateTime.t()
-  defp change_year(date_time, year \\ Date.utc_today().year) do
+  defp change_year(date_time, year) do
     date =
       case Date.new(year, date_time.month, date_time.day) do
         {:ok, date} -> date
